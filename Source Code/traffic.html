@@ -1,0 +1,248 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Smart Traffic Light Simulation (4-way) with Ambulance Priority</title>
+  <style>
+    body { font-family: Arial, sans-serif; display:flex; gap:20px; padding:20px; }
+    #controls { width:300px; }
+    canvas { background:#e9e9e9; border:1px solid #ccc; }
+    label { display:block; margin:8px 0 4px; }
+    input[type="number"]{ width:100%; padding:6px; box-sizing:border-box; }
+    select, button { width:100%; padding:8px; margin-top:8px; }
+    .legend { margin-top:10px; font-size:14px; }
+  </style>
+</head>
+<body>
+  <div id="controls">
+    <h3>Simulation controls</h3>
+    <label>North vehicles</label><input id="nCount" type="number" min="0" value="6">
+    <label>East vehicles</label><input id="eCount" type="number" min="0" value="3">
+    <label>South vehicles</label><input id="sCount" type="number" min="0" value="8">
+    <label>West vehicles</label><input id="wCount" type="number" min="0" value="4">
+
+    <label>Ambulance present?</label>
+    <select id="ambPresence">
+      <option value="none">No ambulance</option>
+      <option value="north">North</option>
+      <option value="east">East</option>
+      <option value="south">South</option>
+      <option value="west">West</option>
+    </select>
+
+    <label>Ambulance distance (meters)</label>
+    <input id="ambDist" type="number" min="0" value="1500">
+
+    <button id="startBtn">Start Simulation</button>
+    <button id="resetBtn">Reset</button>
+
+    <div class="legend">
+      <p><strong>Legend:</strong></p>
+      <p style="margin:2px">Blue = car, Purple = bike, Yellow = ambulance</p>
+      <p style="margin:2px">Green light → vehicles on that side move</p>
+    </div>
+  </div>
+
+  <canvas id="c" width="700" height="700"></canvas>
+
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+
+const startBtn = document.getElementById('startBtn');
+const resetBtn = document.getElementById('resetBtn');
+
+let vehicles = [[],[],[],[]]; // 0:N,1:E,2:S,3:W
+let greenDir = -1;
+let ambulance = null; // {side:0..3, distMeters, speedMps}
+
+const SCALE = 0.6; // pixels per meter (visual mapping)
+const INTERSECTION_X = canvas.width/2;
+const INTERSECTION_Y = canvas.height/2;
+
+function createVehiclesFromInputs() {
+  vehicles = [[],[],[],[]];
+  const counts = [
+    Number(document.getElementById('nCount').value),
+    Number(document.getElementById('eCount').value),
+    Number(document.getElementById('sCount').value),
+    Number(document.getElementById('wCount').value),
+  ];
+  for (let dir=0; dir<4; dir++) {
+    for (let i=0;i<counts[dir];i++){
+      const type = Math.random()<0.6?0:1; // 0 car, 1 bike
+      let v;
+      if (dir===0) v = { x: INTERSECTION_X-30, y: INTERSECTION_Y + 150 + i*18, type, speed: 30 + (type?10:0) }; // north moves up
+      if (dir===1) v = { x: -50 - i*22, y: INTERSECTION_Y+30, type, speed: 30 + (type?10:0) }; // east moves right
+      if (dir===2) v = { x: INTERSECTION_X+10, y: -50 - i*18, type, speed: 30 + (type?10:0) }; // south moves down
+      if (dir===3) v = { x: canvas.width + 50 + i*22, y: INTERSECTION_Y-10, type, speed: 30 + (type?10:0) }; // west moves left
+      vehicles[dir].push(v);
+    }
+  }
+}
+
+function setupAmbulanceFromInputs() {
+  const sel = document.getElementById('ambPresence').value;
+  const dist = Number(document.getElementById('ambDist').value);
+  if (sel === 'none') { ambulance = null; return; }
+  const side = {north:0,east:1,south:2,west:3}[sel];
+  ambulance = { side, distMeters: dist, speedMps: 80 }; // ambulance faster (m/s)
+  // create visual ambulance far off-canvas (position independent from distMeters)
+  if (side===0) ambulance.x = INTERSECTION_X - 30, ambulance.y = INTERSECTION_Y + 150 + 300;
+  if (side===1) ambulance.x = -400, ambulance.y = INTERSECTION_Y + 30;
+  if (side===2) ambulance.x = INTERSECTION_X + 10, ambulance.y = -400;
+  if (side===3) ambulance.x = canvas.width + 400, ambulance.y = INTERSECTION_Y - 10;
+}
+
+function findBusiestDirection() {
+  let maxIdx = 0;
+  let max = vehicles[0].length;
+  for (let i=1;i<4;i++){
+    if (vehicles[i].length > max){ max = vehicles[i].length; maxIdx = i; }
+  }
+  return maxIdx;
+}
+
+let lastTs = performance.now();
+let running = false;
+function tick(ts){
+  if (!running) return;
+  const dt = (ts - lastTs)/1000; lastTs = ts;
+
+  // Update ambulance distance (simulate approaching)
+  if (ambulance){
+    ambulance.distMeters = Math.max(0, ambulance.distMeters - ambulance.speedMps * dt);
+    // move ambulance visually toward intersection
+    const step = ambulance.speedMps * dt * SCALE;
+    switch (ambulance.side){
+      case 0: ambulance.y -= step; break;
+      case 1: ambulance.x += step; break;
+      case 2: ambulance.y += step; break;
+      case 3: ambulance.x -= step; break;
+    }
+    // If ambulance within 1000m => priority
+    if (ambulance.distMeters <= 1000) {
+      greenDir = ambulance.side;
+    }
+    // If ambulance has arrived (very close) we treat as passed and remove it
+    if (ambulance.distMeters <= 0) {
+      // clear ambulance visually and set to null after it crosses
+      ambulance = null;
+      // after the ambulance passes, re-evaluate busiest direction
+      greenDir = findBusiestDirection();
+    }
+  }
+
+  // If no ambulance priority active, pick busiest if green not set
+  if (!ambulance && greenDir === -1) greenDir = findBusiestDirection();
+
+  // Move vehicles on green direction
+  if (greenDir !== -1) {
+    moveVehiclesOnDir(greenDir, dt);
+    // if all vehicles cleared for that dir, return to normal cycle (pick next busiest)
+    if (vehicles[greenDir].length === 0 && !ambulance) {
+      // cycle to next busiest
+      greenDir = findBusiestDirection();
+    }
+  }
+
+  draw();
+  requestAnimationFrame(tick);
+}
+
+function moveVehiclesOnDir(dir, dt){
+  const moveAmount = dt * 60; // pixels per second base
+  const list = vehicles[dir];
+  for (let v of list){
+    const speedFactor = v.speed/30;
+    const step = moveAmount * speedFactor;
+    if (dir===0) v.y -= step;
+    if (dir===1) v.x += step;
+    if (dir===2) v.y += step;
+    if (dir===3) v.x -= step;
+  }
+  // remove vehicles that moved off-screen past intersection
+  vehicles[dir] = list.filter(v => v.x > -200 && v.x < canvas.width + 200 && v.y > -200 && v.y < canvas.height + 200);
+}
+
+function draw(){
+  // background / roads
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  ctx.fillStyle = '#999';
+  ctx.fillRect(INTERSECTION_X-60, 0, 120, canvas.height); // vertical road
+  ctx.fillRect(0, INTERSECTION_Y-60, canvas.width, 120); // horizontal road
+
+  // center box
+  ctx.fillStyle = '#7d7d7d';
+  ctx.fillRect(INTERSECTION_X-60, INTERSECTION_Y-60, 120, 120);
+
+  // Draw traffic lights (N,E,S,W)
+  const lights = [
+    {x:INTERSECTION_X+30, y: INTERSECTION_Y-150}, // North (above)
+    {x:INTERSECTION_X+150, y: INTERSECTION_Y+30}, // East
+    {x:INTERSECTION_X-10, y: INTERSECTION_Y+150}, // South
+    {x:INTERSECTION_X-170, y: INTERSECTION_Y-10}  // West
+  ];
+  for (let i=0;i<4;i++){
+    ctx.fillStyle = '#000';
+    ctx.fillRect(lights[i].x, lights[i].y, 30, 70);
+    // red circle
+    ctx.fillStyle = (greenDir === i) ? '#2ecc71' : '#e74c3c';
+    ctx.beginPath();
+    ctx.arc(lights[i].x + 15, lights[i].y + 20, 10, 0, Math.PI*2);
+    ctx.fill();
+    ctx.fillStyle = '#fff';
+    ctx.font = '12px sans-serif';
+    ctx.fillText(['N','E','S','W'][i], lights[i].x+8, lights[i].y+65);
+    // vehicle count
+    ctx.fillStyle = '#111';
+    ctx.font = '14px sans-serif';
+    ctx.fillText('Cars:'+vehicles[i].length, lights[i].x-10, lights[i].y-6);
+  }
+
+  // draw vehicles
+  for (let dir=0;dir<4;dir++){
+    for (let v of vehicles[dir]){
+      if (v.type===0) ctx.fillStyle = '#1976d2'; else ctx.fillStyle = '#8e24aa';
+      ctx.fillRect(v.x, v.y, 26, 12);
+    }
+  }
+
+  // draw ambulance if present
+  if (ambulance) {
+    ctx.fillStyle = '#f1c40f';
+    ctx.fillRect(ambulance.x, ambulance.y, 30, 14);
+    ctx.fillStyle = '#000';
+    ctx.font = '12px sans-serif';
+    ctx.fillText(Math.round(ambulance.distMeters)+' m', ambulance.x-5, ambulance.y-8);
+  }
+
+  // display info
+  ctx.fillStyle = '#222';
+  ctx.font = '14px sans-serif';
+  ctx.fillText('Green: ' + (greenDir===-1 ? 'none' : ['N','E','S','W'][greenDir]), 10, 20);
+  if (ambulance) ctx.fillText('Ambulance dist: ' + Math.round(ambulance.distMeters)+' m (priority when ≤1000 m)', 10, 40);
+}
+
+startBtn.onclick = () => {
+  createVehiclesFromInputs();
+  setupAmbulanceFromInputs();
+  greenDir = (ambulance && ambulance.distMeters<=1000) ? ambulance.side : -1;
+  running = true;
+  lastTs = performance.now();
+  requestAnimationFrame(tick);
+};
+
+resetBtn.onclick = () => {
+  running = false;
+  vehicles = [[],[],[],[]];
+  ambulance = null;
+  greenDir = -1;
+  draw();
+};
+
+// initial draw
+draw();
+</script>
+</body>
+</html>
